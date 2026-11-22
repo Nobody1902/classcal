@@ -1,0 +1,27 @@
+# Nix
+result
+result-*
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+
+# Python
+__pycache__/
+*.pyc
+
+# Environment / session
+.env
+.easistent_session
+
+# Application data and scratch captures
+data/
+timetable.json
+*.har
