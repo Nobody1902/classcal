@@ -1,8 +1,11 @@
 import json
+import logging
+import re
+import threading
 import typing
 from datetime import date as date_type
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import httpx
 
@@ -10,12 +13,31 @@ WWW_BASE_URL = "https://www.easistent.com"
 MOJ_BASE_URL = "https://moj.easistent.com"
 MOJ_SESSION_COOKIE = "ses"
 LOGOUT_URL = f"{MOJ_BASE_URL}/logout"
-TIMETABLE_NEXT_ACTION = "4033775cfb606ce7190b24caf2e77ca89213132feb"
+TIMETABLE_ACTION_NAME = "getWeekTimetable"
 TIMETABLE_ROUTER_STATE_TREE = (
     "%5B%22%22%2C%7B%22children%22%3A%5B%22(root)%22%2C%7B%22children%22%3A%5B%22"
     "(routes)%22%2C%7B%22children%22%3A%5B%22timetable%22%2C%7B%22children%22%3A%5B%22"
     "__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%2C0%5D%7D%2Cnull%2Cnull%2C4%5D%7D%2Cnull%2Cnull%2C8%5D%7D%2Cnull%2Cnull%2C8%5D%7D%2Cnull%2Cnull%2C28%5D"
 )
+
+logger = logging.getLogger(__name__)
+
+SCRIPT_SRC_RE = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']")
+SERVER_ACTION_RE = re.compile(
+    r"createServerReference\)?\(\s*[\"'](?P<id>[0-9a-f]{32,64})[\"'][^)]*?[\"']"
+    + re.escape(TIMETABLE_ACTION_NAME)
+    + r"[\"']\s*\)"
+)
+
+_timetable_action_id: str | None = None
+_action_id_lock = threading.Lock()
+
+
+def reset_timetable_action_id() -> None:
+    """Forget the cached server action ID (mainly useful in tests)."""
+    global _timetable_action_id
+    with _action_id_lock:
+        _timetable_action_id = None
 
 
 class EasistentClient:
@@ -132,6 +154,46 @@ class EasistentClient:
             str(redirect.url).startswith(LOGOUT_URL) for redirect in response.history
         )
 
+    def _get_timetable_action_id(
+        self, timetable_date: str, *, refresh: bool = False
+    ) -> str:
+        global _timetable_action_id
+        with _action_id_lock:
+            if refresh or _timetable_action_id is None:
+                _timetable_action_id = self._discover_timetable_action_id(
+                    timetable_date
+                )
+            return _timetable_action_id
+
+    def _discover_timetable_action_id(self, timetable_date: str) -> str:
+        page_url = f"{MOJ_BASE_URL}/timetable?date={timetable_date}"
+        page = self.client.get(page_url)
+        if self._is_logged_out(page):
+            self._clear_session()
+            self.login()
+            page = self.client.get(page_url)
+        page.raise_for_status()
+
+        match = SERVER_ACTION_RE.search(page.text)
+        if match:
+            logger.info("Discovered timetable server action %s", match["id"])
+            return match["id"]
+
+        for source in SCRIPT_SRC_RE.findall(page.text):
+            script_url = urljoin(str(page.url), source)
+            if not script_url.startswith(MOJ_BASE_URL):
+                continue
+            chunk = self.client.get(script_url)
+            chunk.raise_for_status()
+            match = SERVER_ACTION_RE.search(chunk.text)
+            if match:
+                logger.info("Discovered timetable server action %s", match["id"])
+                return match["id"]
+
+        raise RuntimeError(
+            f"could not find {TIMETABLE_ACTION_NAME} server action on timetable page"
+        )
+
     def _parse_timetable_response(self, response: httpx.Response):
         content_type = response.headers.get("content-type", "")
         if "text/x-component" in content_type:
@@ -155,7 +217,7 @@ class EasistentClient:
         return response.json()
 
     def _request_timetable(
-        self, timetable_date: str, week_start_date: str
+        self, timetable_date: str, week_start_date: str, action_id: str
     ) -> httpx.Response:
         return self.client.post(
             f"{MOJ_BASE_URL}/timetable",
@@ -164,7 +226,7 @@ class EasistentClient:
             headers={
                 "Accept": "text/x-component",
                 "Content-Type": "text/plain;charset=UTF-8",
-                "next-action": TIMETABLE_NEXT_ACTION,
+                "next-action": action_id,
                 "next-router-state-tree": TIMETABLE_ROUTER_STATE_TREE,
                 "Referer": f"{MOJ_BASE_URL}/timetable?date={timetable_date}",
                 "Origin": MOJ_BASE_URL,
@@ -180,11 +242,24 @@ class EasistentClient:
         if not self.has_session():
             self.login()
 
-        response = self._request_timetable(timetable_date, week_start_date)
+        action_id = self._get_timetable_action_id(timetable_date)
+        response = self._request_timetable(
+            timetable_date, week_start_date, action_id
+        )
         if self._is_logged_out(response):
             self._clear_session()
             self.login()
-            response = self._request_timetable(timetable_date, week_start_date)
+            action_id = self._get_timetable_action_id(timetable_date)
+            response = self._request_timetable(
+                timetable_date, week_start_date, action_id
+            )
+
+        if response.status_code == 409:
+            logger.info("Timetable server action was rejected; rediscovering it")
+            action_id = self._get_timetable_action_id(timetable_date, refresh=True)
+            response = self._request_timetable(
+                timetable_date, week_start_date, action_id
+            )
 
         response.raise_for_status()
         return self._parse_timetable_response(response)

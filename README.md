@@ -106,6 +106,8 @@ The timetable manager is always consulted before the calendar cache. An expired 
 
 ## Stale data
 
+The scraper discovers the current timetable server action ID from the page's JavaScript chunks and caches it in the process. If Easistent rejects it with HTTP 409, the ID is rediscovered and the request is retried, so a site deployment cannot silently pin the app to stale data.
+
 If Easistent is unavailable (network error, login failure, rate limiting, bad response), previously cached weeks are still served. The generated calendar then contains:
 
 - a calendar-level `DESCRIPTION` warning,
