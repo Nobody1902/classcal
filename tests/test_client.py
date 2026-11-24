@@ -33,12 +33,12 @@ def make_client(tmp_path, handler):
             ]
         )
     )
-    client = EasistentClient("user", "password", session_file=session_file)
-    client.client.close()
-    client.client = httpx.Client(
+    http_client = httpx.Client(
         transport=httpx.MockTransport(handler), follow_redirects=True
     )
-    client._load_session()
+    client = EasistentClient(
+        "user", "password", session_file=session_file, client=http_client
+    )
     return client
 
 

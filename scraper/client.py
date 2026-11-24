@@ -47,11 +47,12 @@ class EasistentClient:
         password: str,
         timeout: float = 20.0,
         session_file: str | Path = ".easistent_session",
+        client: httpx.Client | None = None,
     ):
         self.username = username
         self.password = password
         self.session_file = Path(session_file)
-        self.client = httpx.Client(
+        self.client = client or httpx.Client(
             timeout=timeout,
             follow_redirects=True,
             headers={"User-Agent": "Mozilla/5.0"},
